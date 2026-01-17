@@ -190,28 +190,71 @@ def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary
     print(f"Results saved to {output_text_path}.")
 
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Transcribe multi-language audio using Whisper and VAD.")
+
     parser.add_argument("-i", "--input", required=True, help="Input audio file path (e.g., input_source.mp3)")
-    parser.add_argument("-o", "--output", required=True, help="Output text file path (e.g., output_text.txt)")
+
+    parser.add_argument("-o", "--output", required=True, help="Output text file path (e.g., output_text.txt) or a directory.")
+
     parser.add_argument("-l", "--lang_codes", required=True, 
+
                         help="Comma-separated language codes (e.g., en,hi). First is primary, second is fallback.")
+
     parser.add_argument("-t", "--transliterate", action="store_true", 
+
                         help="If specified, add phonetic transliteration for the secondary language.")
+
     parser.add_argument("--min_speech_duration_ms", type=int, default=300,
+
                         help="Minimum duration of speech to consider as a segment (ms). Default: 300ms.")
+
     parser.add_argument("--min_silence_duration_ms", type=int, default=600,
+
                         help="Minimum duration of silence to consider as a segment boundary (ms). Default: 600ms.")
+
     
+
     args = parser.parse_args()
 
+
+
+    output_path = args.output
+
+    # If the specified output path is a directory, generate the filename from the input.
+
+    if os.path.isdir(output_path):
+
+        input_basename = os.path.basename(args.input)
+
+        filename_without_ext = os.path.splitext(input_basename)[0]
+
+        output_filename = f"{filename_without_ext}.txt"
+
+        output_path = os.path.join(output_path, output_filename)
+
+        print(f"Output path is a directory. Writing to: {output_path}")
+
+
+
     lang_codes = args.lang_codes.split(',')
+
     if len(lang_codes) < 2:
+
         print("Error: Please provide at least two language codes (primary, secondary).")
+
         exit(1)
+
     
+
     primary_lang = lang_codes[0].strip()
+
     secondary_lang = lang_codes[1].strip()
 
-    transcribe_audio(args.input, args.output, primary_lang, secondary_lang, args.transliterate,
+
+
+    transcribe_audio(args.input, output_path, primary_lang, secondary_lang, args.transliterate,
+
                     min_speech_duration_ms=args.min_speech_duration_ms,
+
                     min_silence_duration_ms=args.min_silence_duration_ms)

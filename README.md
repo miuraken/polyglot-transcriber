@@ -57,7 +57,7 @@ python3 transcriber.py -i <input_audio_file> -o <output_text_file> -l <primary_l
 ### Arguments
 
 *   `-i, --input <input_audio_file>`: Path to the input audio file (e.g., `audio.mp3`, `audio.m4a`). **Required.**
-*   `-o, --output <output_text_file>`: Path to the output text file where the transcription will be saved (e.g., `transcription.txt`). **Required.**
+*   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. **Required.**
 *   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). Any segment not detected as the primary language will be transcribed using the secondary language. **Required.**
 *   `-t, --transliterate`: (Optional switch) If specified, phonetic transliteration (IAST) will be added in parentheses for segments transcribed in the secondary language.
 *   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `300ms`.
