@@ -10,16 +10,17 @@ from indic_transliteration import sanscript
 from indic_transliteration.sanscript import SchemeMap, SCHEMES, transliterate
 import argparse
 
-# VADの感度設定 (1: 積極的, 2: 中程度, 3: 穏やか)
+# VAD aggressiveness setting (1: aggressive, 2: mid-aggressive, 3: least aggressive)
 VAD_AGGRESSIVENESS = 1
-SAMPLE_RATE = 16000 # webrtcvadは16kHzを要求
-FRAME_LENGTH_MS = 30 # webrtcvadは10, 20, 30msのフレーム長を要求
+SAMPLE_RATE = 16000 # webrtcvad requires 16kHz
+FRAME_LENGTH_MS = 30 # webrtcvad requires 10, 20, or 30ms frame lengths
 
 def read_wave(path):
     """Reads a .wav file.
     Takes the path, returns (sample_rate, audio_data).
     """
     audio, sr = librosa.load(path, sr=SAMPLE_RATE, mono=True)
+    # webrtcvad requires 16bit PCM
     audio_int16 = (audio * 32767).astype(np.int16)
     return sr, audio_int16.tobytes()
 
@@ -54,7 +55,7 @@ def vad_segment_generator(wave_file, aggressiveness):
     frames = frame_generator(FRAME_LENGTH_MS, audio, sample_rate)
     frames = list(frames)
 
-    ring_buffer = deque(maxlen=10)
+    ring_buffer = deque(maxlen=10) # 0.3 seconds of frames
     triggered = False
     voiced_frames = []
 
@@ -82,76 +83,83 @@ def vad_segment_generator(wave_file, aggressiveness):
         yield b''.join([f.bytes for f in voiced_frames])
 
 def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, add_transliteration):
-    print("Whisperモデルをロード中...")
-    model = whisper.load_model("large")
-    print("モデルのロードが完了しました。")
-
-    print(f"音声ファイル {input_audio_path} の処理を開始します...")
+    print("Loading Whisper model...")
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    model = whisper.load_model("large", device=device)
+    print(f"Whisper model loaded. Using device: {device}")
 
     sample_rate, audio_data = read_wave(input_audio_path)
 
     all_segments_transcription = []
-    segment_start_time = 0.0
+    current_overall_time = 0.0 # Track overall elapsed time
 
-    print("VADで音声セグメントを検出中...")
+    print("Detecting speech segments with VAD...")
     for i, segment_bytes in enumerate(vad_segment_generator((sample_rate, audio_data), VAD_AGGRESSIVENESS)):
+        segment_audio_float = np.frombuffer(segment_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        segment_duration_vad = len(segment_audio_float) / sample_rate
+
+        # Skip too short VAD segments to avoid unstable Whisper language detection
+        if segment_duration_vad < 1.0: # Skip segments shorter than 1 second
+            current_overall_time += segment_duration_vad
+            continue
+
+        # Save VAD segment to a temporary file
         temp_audio_path = f"temp_vad_segment_{i}.wav"
-        segment_audio_np = np.frombuffer(segment_bytes, dtype=np.int16)
-        write_wave(temp_audio_path, segment_audio_np, sample_rate)
+        sf.write(temp_audio_path, segment_audio_float, SAMPLE_RATE)
 
-        segment_audio_whisper = whisper.load_audio(temp_audio_path)
-        segment_audio_padded = whisper.pad_or_trim(segment_audio_whisper)
-        segment_mel = whisper.log_mel_spectrogram(segment_audio_padded, n_mels=128).to(model.device)
+        # Detect language for the VAD segment using Whisper's low-level API
+        segment_audio_whisper_for_lang_detect = whisper.load_audio(temp_audio_path)
+        segment_audio_padded_for_lang_detect = whisper.pad_or_trim(segment_audio_whisper_for_lang_detect)
+        segment_mel_for_lang_detect = whisper.log_mel_spectrogram(segment_audio_padded_for_lang_detect, n_mels=128).to(model.device)
+        _, probs = model.detect_language(segment_mel_for_lang_detect)
+        detected_language_for_transcribe = max(probs, key=probs.get)
 
-        _, probs = model.detect_language(segment_mel)
-        detected_language = max(probs, key=probs.get)
-        
-        # 言語コードの置き換えロジック
-        if detected_language != primary_lang:
-            detected_language = secondary_lang
-        
-        segment_duration = len(segment_audio_np) / sample_rate
-        segment_end_time = segment_start_time + segment_duration
+        # Apply language code replacement logic
+        if detected_language_for_transcribe != primary_lang:
+            detected_language_for_transcribe = secondary_lang
 
-        print(f"  セグメント {segment_start_time:.2f}s - {segment_end_time:.2f}s: 検出言語 = {detected_language}")
+        print(f"  VAD Segment {current_overall_time:.2f}s - {current_overall_time + segment_duration_vad:.2f}s: Detected language = {detected_language_for_transcribe}")
 
-        segment_options = whisper.DecodingOptions(
-            fp16=False,
+        # Call whisper.transcribe
+        # transcribe handles internal padding/trimming and utterance boundary processing
+        transcribe_result = whisper.transcribe(
+            model,
+            temp_audio_path,
+            fp16=False, # Force FP32 for stability, even on GPU
             task="transcribe",
-            language=detected_language
+            language=detected_language_for_transcribe # Pass detected language to transcribe
         )
-        result = whisper.decode(model, segment_mel, segment_options)
-
-        all_segments_transcription.append({
-            "start": segment_start_time,
-            "end": segment_end_time,
-            "language": detected_language,
-            "text": result.text
-        })
         
-        segment_start_time = segment_end_time
-        os.remove(temp_audio_path)
+        # Use segments from transcribe_result for more detailed output
+        for segment_whisper in transcribe_result["segments"]:
+            all_segments_transcription.append({
+                "start": current_overall_time + segment_whisper["start"],
+                "end": current_overall_time + segment_whisper["end"],
+                "language": detected_language_for_transcribe, # Language after replacement
+                "text": segment_whisper["text"]
+            })
+        
+        current_overall_time += segment_duration_vad # Update overall elapsed time
+        os.remove(temp_audio_path) # Delete temporary file
 
-    print("書き起こしが完了しました。")
+    print("Transcription complete.")
 
     with open(output_text_path, "w", encoding="utf-8") as f:
         for segment in all_segments_transcription:
             output_line = f"{segment['start']:.2f} [{segment['language']}] {segment['text'].strip()}"
             
-            # アルファベット表記の追記ロジック
             if add_transliteration and segment['language'] == secondary_lang:
-                # 現在はヒンディー語のみ対応
                 if secondary_lang == "hi":
+                    # Transliterate Devanagari to IAST
                     roman_text = transliterate(segment['text'].strip(), sanscript.DEVANAGARI, sanscript.IAST)
                     output_line += f" ({roman_text})"
                 else:
-                    # 他の言語のローマ字表記は未実装
                     output_line += " (Transliteration not available for this language)"
             
             f.write(output_line + "\n")
 
-    print(f"--- 完了 ---")
-    print(f"結果は {output_text_path} に保存されました。")
+    print(f"--- Process finished ---")
+    print(f"Results saved to {output_text_path}.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe multi-language audio using Whisper and VAD.")
