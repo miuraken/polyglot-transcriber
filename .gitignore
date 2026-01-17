@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+myenv/ # 仮想環境のディレクトリ名
+
+# Editor
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+.Trashes
+Thumbs.db
+
+# Whisper model cache
+~/.cache/whisper/
+
+# Temporary VAD segments
+temp_vad_segment_*.wav
+
+# Output files
+output.txt
+whisper_output.txt
+whisper_multi_lang_output.txt
+whisper_vad_librosa_output.txt
+transcription.txt
+
+# Service account key (if any)
+service_account_key.json
