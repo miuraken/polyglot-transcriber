@@ -48,41 +48,77 @@ def frame_generator(frame_duration_ms, audio, sample_rate):
         offset += n
         timestamp += duration
 
-def vad_segment_generator(wave_file, aggressiveness):
-    """Generates segments of audio based on voice activity detection."""
+def vad_segment_generator(wave_file, aggressiveness, min_speech_duration_ms=300, min_silence_duration_ms=600):
+    """Generates segments of audio based on voice activity detection.
+    Yields (start_time, end_time, segment_bytes) tuples.
+    """
     sample_rate, audio = wave_file
     vad = webrtcvad.Vad(aggressiveness)
     frames = frame_generator(FRAME_LENGTH_MS, audio, sample_rate)
     frames = list(frames)
 
-    ring_buffer = deque(maxlen=10) # 0.3 seconds of frames
-    triggered = False
-    voiced_frames = []
+    segments = []
+    
+    # VADのサンプルコードを参考に、より洗練されたセグメント抽出ロジックを実装
+    # https://github.com/wiseman/py-webrtcvad/blob/master/example.py
 
-    for frame in frames:
-        is_speech = vad.is_speech(frame.bytes, sample_rate)
+    # 各フレームが発話かどうかを判定
+    is_speech_flags = [vad.is_speech(frame.bytes, sample_rate) for frame in frames]
 
-        if not triggered:
-            ring_buffer.append((frame, is_speech))
-            num_voiced = len([f for f, speech in ring_buffer if speech])
-            if num_voiced > 0.9 * ring_buffer.maxlen:
-                triggered = True
-                for f, s in ring_buffer:
-                    voiced_frames.append(f)
-                ring_buffer.clear()
+    # 連続する発話/無音の長さを追跡
+    current_speech_frames = 0
+    current_silence_frames = 0
+    segment_start_frame_index = 0
+
+    for i, is_speech in enumerate(is_speech_flags):
+        if is_speech:
+            current_speech_frames += 1
+            current_silence_frames = 0
         else:
-            voiced_frames.append(frame)
-            ring_buffer.append((frame, is_speech))
-            num_unvoiced = len([f for f, speech in ring_buffer if not speech])
-            if num_unvoiced > 0.9 * ring_buffer.maxlen:
-                triggered = False
-                yield b''.join([f.bytes for f in voiced_frames])
-                ring_buffer.clear()
-                voiced_frames = []
-    if voiced_frames:
-        yield b''.join([f.bytes for f in voiced_frames])
+            current_silence_frames += 1
+            current_speech_frames = 0 # 無音であれば発話カウントをリセット
 
-def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, add_transliteration):
+        # 発話が一定時間続いたらセグメント開始 (または継続)
+        if current_speech_frames * FRAME_LENGTH_MS >= min_speech_duration_ms and segment_start_frame_index == 0:
+            segment_start_frame_index = i - current_speech_frames + 1 # 発話開始フレームのインデックス
+
+        # 無音が一定時間続いたらセグメント終了
+        if current_silence_frames * FRAME_LENGTH_MS >= min_silence_duration_ms and segment_start_frame_index != 0:
+            segment_end_frame_index = i - current_silence_frames + 1 # 無音開始フレームのインデックス
+            
+            # セグメントを抽出
+            segment_bytes_list = []
+            for j in range(segment_start_frame_index, segment_end_frame_index):
+                segment_bytes_list.append(frames[j].bytes)
+            
+            start_time = frames[segment_start_frame_index].timestamp
+            end_time = frames[segment_end_frame_index - 1].timestamp + frames[segment_end_frame_index - 1].duration
+            
+            yield (start_time, end_time, b''.join(segment_bytes_list))
+            
+            segment_start_frame_index = 0
+            current_speech_frames = 0
+            current_silence_frames = 0
+    
+    # 最後のセグメントを処理
+    if segment_start_frame_index != 0:
+        segment_end_frame_index = len(frames)
+        segment_bytes_list = []
+        for j in range(segment_start_frame_index, segment_end_frame_index):
+            segment_bytes_list.append(frames[j].bytes)
+        
+        start_time = frames[segment_start_frame_index].timestamp
+        end_time = frames[segment_end_frame_index - 1].timestamp + frames[segment_end_frame_index - 1].duration
+        yield (start_time, end_time, b''.join(segment_bytes_list))
+
+
+def format_time(seconds):
+    """Formats seconds into MM:SS.ms string."""
+    minutes = int(seconds // 60)
+    remaining_seconds = seconds % 60
+    return f"{minutes:02d}:{remaining_seconds:05.2f}"
+
+def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, add_transliteration, min_speech_duration_ms, min_silence_duration_ms):
     print("Loading Whisper model...")
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model = whisper.load_model("large", device=device)
@@ -90,74 +126,66 @@ def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary
 
     sample_rate, audio_data = read_wave(input_audio_path)
 
-    all_segments_transcription = []
-    current_overall_time = 0.0 # Track overall elapsed time
-
     print("Detecting speech segments with VAD...")
-    for i, segment_bytes in enumerate(vad_segment_generator((sample_rate, audio_data), VAD_AGGRESSIVENESS)):
-        segment_audio_float = np.frombuffer(segment_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        segment_duration_vad = len(segment_audio_float) / sample_rate
-
-        # Skip too short VAD segments to avoid unstable Whisper language detection
-        if segment_duration_vad < 1.0: # Skip segments shorter than 1 second
-            current_overall_time += segment_duration_vad
-            continue
-
-        # Save VAD segment to a temporary file
-        temp_audio_path = f"temp_vad_segment_{i}.wav"
-        sf.write(temp_audio_path, segment_audio_float, SAMPLE_RATE)
-
-        # Detect language for the VAD segment using Whisper's low-level API
-        segment_audio_whisper_for_lang_detect = whisper.load_audio(temp_audio_path)
-        segment_audio_padded_for_lang_detect = whisper.pad_or_trim(segment_audio_whisper_for_lang_detect)
-        segment_mel_for_lang_detect = whisper.log_mel_spectrogram(segment_audio_padded_for_lang_detect, n_mels=128).to(model.device)
-        _, probs = model.detect_language(segment_mel_for_lang_detect)
-        detected_language_for_transcribe = max(probs, key=probs.get)
-
-        # Apply language code replacement logic
-        if detected_language_for_transcribe != primary_lang:
-            detected_language_for_transcribe = secondary_lang
-
-        print(f"  VAD Segment {current_overall_time:.2f}s - {current_overall_time + segment_duration_vad:.2f}s: Detected language = {detected_language_for_transcribe}")
-
-        # Call whisper.transcribe
-        # transcribe handles internal padding/trimming and utterance boundary processing
-        transcribe_result = whisper.transcribe(
-            model,
-            temp_audio_path,
-            fp16=False, # Force FP32 for stability, even on GPU
-            task="transcribe",
-            language=detected_language_for_transcribe # Pass detected language to transcribe
-        )
-        
-        # Use segments from transcribe_result for more detailed output
-        for segment_whisper in transcribe_result["segments"]:
-            all_segments_transcription.append({
-                "start": current_overall_time + segment_whisper["start"],
-                "end": current_overall_time + segment_whisper["end"],
-                "language": detected_language_for_transcribe, # Language after replacement
-                "text": segment_whisper["text"]
-            })
-        
-        current_overall_time += segment_duration_vad # Update overall elapsed time
-        os.remove(temp_audio_path) # Delete temporary file
-
-    print("Transcription complete.")
+    pid = os.getpid()
+    input_filename_hash = hash(input_audio_path) % (10**8)
 
     with open(output_text_path, "w", encoding="utf-8") as f:
-        for segment in all_segments_transcription:
-            output_line = f"{segment['start']:.2f} [{segment['language']}] {segment['text'].strip()}"
-            
-            if add_transliteration and segment['language'] == secondary_lang:
-                if secondary_lang == "hi":
-                    # Transliterate Devanagari to IAST
-                    roman_text = transliterate(segment['text'].strip(), sanscript.DEVANAGARI, sanscript.IAST)
-                    output_line += f" ({roman_text})"
-                else:
-                    output_line += " (Transliteration not available for this language)"
-            
-            f.write(output_line + "\n")
+        for i, (segment_start_time_abs, segment_end_time_abs, segment_bytes) in enumerate(vad_segment_generator((sample_rate, audio_data), VAD_AGGRESSIVENESS, min_speech_duration_ms, min_silence_duration_ms)):
+            segment_audio_float = np.frombuffer(segment_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            segment_duration_vad = len(segment_audio_float) / sample_rate
 
+            if segment_duration_vad < 1.0: # Skip segments shorter than 1 second
+                continue
+
+            temp_audio_path = f"temp_vad_segment_{pid}_{input_filename_hash}_{i}.wav"
+            sf.write(temp_audio_path, segment_audio_float, SAMPLE_RATE)
+
+            segment_audio_whisper_for_lang_detect = whisper.load_audio(temp_audio_path)
+            segment_audio_padded_for_lang_detect = whisper.pad_or_trim(segment_audio_whisper_for_lang_detect)
+            segment_mel_for_lang_detect = whisper.log_mel_spectrogram(segment_audio_padded_for_lang_detect, n_mels=128).to(model.device)
+            _, probs = model.detect_language(segment_mel_for_lang_detect)
+            detected_language_for_transcribe = max(probs, key=probs.get)
+
+            if detected_language_for_transcribe != primary_lang:
+                detected_language_for_transcribe = secondary_lang
+
+            # print(f"  VAD Segment {format_time(segment_start_time_abs)} - {format_time(segment_end_time_abs)}: Detected language = {detected_language_for_transcribe}")
+
+            transcribe_result = whisper.transcribe(
+                model,
+                temp_audio_path,
+                fp16=False,
+                task="transcribe",
+                language=detected_language_for_transcribe
+            )
+            
+            for segment_whisper in transcribe_result["segments"]:
+                start_time_final = segment_start_time_abs + segment_whisper["start"]
+                end_time_final = segment_start_time_abs + segment_whisper["end"]
+                text_final = segment_whisper["text"]
+                language_final = detected_language_for_transcribe
+
+                output_line = f"{format_time(start_time_final)} [{language_final}] {text_final.strip()}"
+                
+                if add_transliteration and language_final == secondary_lang:
+                    if secondary_lang == "hi":
+                        roman_text = transliterate(text_final.strip(), sanscript.DEVANAGARI, sanscript.IAST)
+                        output_line += f" ({roman_text})"
+                    else:
+                        output_line += " (Transliteration not available for this language)"
+                
+                f.write(output_line + "\n")
+                f.flush() # Flush to disk immediately
+
+                # VADセグメントの書き起こし結果の最初の部分をログに追記
+                first_30_chars = text_final[:30].replace('\n', ' ') + ('...' if len(text_final) > 30 else '')
+                print(f"  VAD Segment {format_time(segment_start_time_abs)} - {format_time(segment_end_time_abs)}: Detected language = {detected_language_for_transcribe} - \"{first_30_chars}\"")
+
+
+            os.remove(temp_audio_path) # Delete temporary file
+
+    print("Transcription complete.")
     print(f"--- Process finished ---")
     print(f"Results saved to {output_text_path}.")
 
@@ -169,6 +197,10 @@ if __name__ == "__main__":
                         help="Comma-separated language codes (e.g., en,hi). First is primary, second is fallback.")
     parser.add_argument("-t", "--transliterate", action="store_true", 
                         help="If specified, add phonetic transliteration for the secondary language.")
+    parser.add_argument("--min_speech_duration_ms", type=int, default=300,
+                        help="Minimum duration of speech to consider as a segment (ms). Default: 300ms.")
+    parser.add_argument("--min_silence_duration_ms", type=int, default=600,
+                        help="Minimum duration of silence to consider as a segment boundary (ms). Default: 600ms.")
     
     args = parser.parse_args()
 
@@ -180,4 +212,6 @@ if __name__ == "__main__":
     primary_lang = lang_codes[0].strip()
     secondary_lang = lang_codes[1].strip()
 
-    transcribe_audio(args.input, args.output, primary_lang, secondary_lang, args.transliterate)
+    transcribe_audio(args.input, args.output, primary_lang, secondary_lang, args.transliterate,
+                    min_speech_duration_ms=args.min_speech_duration_ms,
+                    min_silence_duration_ms=args.min_silence_duration_ms)
