@@ -51,23 +51,35 @@ This project provides a command-line tool to transcribe multi-language audio fil
 Run the `transcriber.py` script with the following command-line arguments:
 
 ```bash
-python3 transcriber.py -i <input_audio_file> -o <output_path> -l <primary_lang,secondary_lang> [--min_speech_duration_ms <ms>] [--min_silence_duration_ms <ms>]
+python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang,secondary_lang> [--min_speech_duration_ms <ms>] [--min_silence_duration_ms <ms>] [--lang_prob_threshold <float>]
 ```
 
 ### Arguments
 
 *   `-i, --input <input_audio_file>`: Path to the input audio file (e.g., `audio.mp3`, `audio.m4a`). **Required.**
-*   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. **Required.**
-*   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). Any segment not detected as the primary language will be transcribed using the secondary language. **Required.**
+*   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. If not specified, the output file will be saved in the same directory as the input audio file, named after the input file with a `.txt` extension.
+*   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). **Required.**
 *   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `300ms`.
 *   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `600ms`.
+*   `--lang_prob_threshold <float>`: Probability threshold for language detection. If the detected probability of the primary language is below this value, the script will fall back to the secondary language. Default: `0.90`. This is useful for forcing the secondary language when Whisper is not confident about its detection of the primary language.
 
 ### Example
 
-To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary (transliteration for Hindi is automatic):
+To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary (transliteration for Hindi is automatic), saving the output to `hindi1_sample.txt` in the same directory:
+
+```bash
+python3 transcriber.py -i hindi1_sample.m4a -l en,hi
+```
+
+You can still specify an output path if needed:
 
 ```bash
 python3 transcriber.py -i hindi1_sample.m4a -o transcription.txt -l en,hi
+```
+
+If you find that Hindi segments are being misidentified as English, you can try lowering the threshold to be more aggressive about forcing the switch to Hindi:
+```bash
+python3 transcriber.py -i your_long_file.mp3 -o . -l en,hi --lang_prob_threshold 0.80
 ```
 
 The console output will show progress like this:

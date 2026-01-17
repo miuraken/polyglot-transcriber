@@ -118,7 +118,7 @@ def format_time(seconds):
     remaining_seconds = seconds % 60
     return f"{minutes:02d}:{remaining_seconds:05.2f}"
 
-def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, min_speech_duration_ms, min_silence_duration_ms):
+def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, min_speech_duration_ms, min_silence_duration_ms, lang_prob_threshold):
     print("Loading Whisper model...")
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model = whisper.load_model("large", device=device)
@@ -144,13 +144,38 @@ def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary
             segment_audio_whisper_for_lang_detect = whisper.load_audio(temp_audio_path)
             segment_audio_padded_for_lang_detect = whisper.pad_or_trim(segment_audio_whisper_for_lang_detect)
             segment_mel_for_lang_detect = whisper.log_mel_spectrogram(segment_audio_padded_for_lang_detect, n_mels=128).to(model.device)
+            
             _, probs = model.detect_language(segment_mel_for_lang_detect)
-            detected_language_for_transcribe = max(probs, key=probs.get)
+            most_likely_lang = max(probs, key=probs.get)
+            primary_lang_prob = probs.get(primary_lang, 0)
+            
+            lang_forced = False # Initialize flag
 
-            if detected_language_for_transcribe != primary_lang:
+            if most_likely_lang == primary_lang and primary_lang_prob < lang_prob_threshold:
                 detected_language_for_transcribe = secondary_lang
+                lang_forced = True # Mark as forced
+            elif most_likely_lang != primary_lang:
+                detected_language_for_transcribe = secondary_lang
+            else:
+                detected_language_for_transcribe = primary_lang
 
-            # print(f"  VAD Segment {format_time(segment_start_time_abs)} - {format_time(segment_end_time_abs)}: Detected language = {detected_language_for_transcribe}")
+            # Get the probability of the most likely language that was initially detected by Whisper
+            # regardless of whether it was forced to secondary_lang.
+            # This is to show the *model's* confidence for the most likely language it found.
+            # If the user wants the probability of the *final chosen* language, it would be different.
+            # For "hi (80%)", it implies the probability of HI if HI was detected, or the prob of EN if EN was detected.
+            # Let's use the probability of the `most_likely_lang` from Whisper's original detection.
+            
+            final_display_prob_value = probs.get(most_likely_lang, 0)
+            
+            # Determine the language string for logging (e.g., "hi" or "hi*")
+            display_lang_str = detected_language_for_transcribe
+            if lang_forced:
+                display_lang_str += "*"
+            
+            # Format the confidence percentage
+            confidence_str = f" ({int(final_display_prob_value * 100)}%)"
+
 
             transcribe_result = whisper.transcribe(
                 model,
@@ -180,7 +205,7 @@ def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary
 
                 # VADセグメントの書き起こし結果の最初の部分をログに追記
                 first_30_chars = text_final[:30].replace('\n', ' ') + ('...' if len(text_final) > 30 else '')
-                print(f"  VAD Segment {format_time(segment_start_time_abs)} - {format_time(segment_end_time_abs)}: Detected language = {detected_language_for_transcribe} - \"{first_30_chars}\"")
+                print(f"  VAD Segment {format_time(segment_start_time_abs)} - {format_time(segment_end_time_abs)}: Detected language = {display_lang_str}{confidence_str} - \"{first_30_chars}\"")
 
 
             os.remove(temp_audio_path) # Delete temporary file
@@ -195,7 +220,7 @@ if __name__ == "__main__":
 
     parser.add_argument("-i", "--input", required=True, help="Input audio file path (e.g., input_source.mp3)")
 
-    parser.add_argument("-o", "--output", required=True, help="Output text file path (e.g., output_text.txt) or a directory.")
+    parser.add_argument("-o", "--output", required=False, default=None, help="Output text file path (e.g., output_text.txt) or a directory. If not specified, output will be saved in the same directory as the input audio file.")
 
     parser.add_argument("-l", "--lang_codes", required=True, 
 
@@ -209,7 +234,11 @@ if __name__ == "__main__":
 
                         help="Minimum duration of silence to consider as a segment boundary (ms). Default: 600ms.")
 
-    
+    parser.add_argument("--lang_prob_threshold", type=float, default=0.90,
+
+                        help="Probability threshold to force secondary language. If primary lang prob is below this, use secondary. Default: 0.90.")
+
+
 
     args = parser.parse_args()
 
@@ -217,9 +246,25 @@ if __name__ == "__main__":
 
     output_path = args.output
 
-    # If the specified output path is a directory, generate the filename from the input.
+    if output_path is None:
 
-    if os.path.isdir(output_path):
+        # If -o is not provided, use the input file's directory
+
+        input_dir = os.path.dirname(args.input)
+
+        input_basename = os.path.basename(args.input)
+
+        filename_without_ext = os.path.splitext(input_basename)[0]
+
+        output_filename = f"{filename_without_ext}.txt"
+
+        output_path = os.path.join(input_dir, output_filename)
+
+        print(f"Output path not specified. Writing to: {output_path} (same as input audio)")
+
+    elif os.path.isdir(output_path):
+
+        # If -o is a directory, use it as before
 
         input_basename = os.path.basename(args.input)
 
@@ -230,6 +275,10 @@ if __name__ == "__main__":
         output_path = os.path.join(output_path, output_filename)
 
         print(f"Output path is a directory. Writing to: {output_path}")
+
+    # Else (output_path is a file path), use it as is.
+
+
 
 
 
@@ -253,4 +302,6 @@ if __name__ == "__main__":
 
                     min_speech_duration_ms=args.min_speech_duration_ms,
 
-                    min_silence_duration_ms=args.min_silence_duration_ms)
+                    min_silence_duration_ms=args.min_silence_duration_ms,
+
+                    lang_prob_threshold=args.lang_prob_threshold)
