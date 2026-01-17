@@ -51,7 +51,7 @@ This project provides a command-line tool to transcribe multi-language audio fil
 Run the `transcriber.py` script with the following command-line arguments:
 
 ```bash
-python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang,secondary_lang> [--min_speech_duration_ms <ms>] [--min_silence_duration_ms <ms>] [--lang_prob_threshold <float>]
+python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang,secondary_lang> [options]
 ```
 
 ### Arguments
@@ -62,10 +62,11 @@ python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang
 *   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `300ms`.
 *   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `600ms`.
 *   `--lang_prob_threshold <float>`: Probability threshold for language detection. If the detected probability of the primary language is below this value, the script will fall back to the secondary language. Default: `0.90`. This is useful for forcing the secondary language when Whisper is not confident about its detection of the primary language.
+*   `--vad_aggressiveness <0-3>`: Sets the VAD aggressiveness mode. An integer from 0 to 3, where 0 is the least aggressive (most sensitive to picking up speech) and 3 is the most aggressive (least sensitive). Default: `1`.
 
 ### Example
 
-To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary (transliteration for Hindi is automatic), saving the output to `hindi1_sample.txt` in the same directory:
+To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary, saving the output to `hindi1_sample.txt` in the same directory:
 
 ```bash
 python3 transcriber.py -i hindi1_sample.m4a -l en,hi
@@ -77,9 +78,14 @@ You can still specify an output path if needed:
 python3 transcriber.py -i hindi1_sample.m4a -o transcription.txt -l en,hi
 ```
 
-If you find that Hindi segments are being misidentified as English, you can try lowering the threshold to be more aggressive about forcing the switch to Hindi:
+If you find that short words are being missed entirely, try making the VAD more sensitive by setting `--vad_aggressiveness` to `0`:
 ```bash
-python3 transcriber.py -i your_long_file.mp3 -o . -l en,hi --lang_prob_threshold 0.80
+python3 transcriber.py -i your_long_file.mp3 -l en,hi --vad_aggressiveness 0
+```
+
+If you find that Hindi segments are being misidentified as English, you can try lowering the language probability threshold:
+```bash
+python3 transcriber.py -i your_long_file.mp3 -l en,hi --lang_prob_threshold 0.80
 ```
 
 The console output will show progress like this:
