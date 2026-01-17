@@ -118,7 +118,7 @@ def format_time(seconds):
     remaining_seconds = seconds % 60
     return f"{minutes:02d}:{remaining_seconds:05.2f}"
 
-def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, add_transliteration, min_speech_duration_ms, min_silence_duration_ms):
+def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, min_speech_duration_ms, min_silence_duration_ms):
     print("Loading Whisper model...")
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model = whisper.load_model("large", device=device)
@@ -168,7 +168,7 @@ def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary
 
                 output_line = f"{format_time(start_time_final)} [{language_final}] {text_final.strip()}"
                 
-                if add_transliteration and language_final == secondary_lang:
+                if language_final == secondary_lang:
                     if secondary_lang == "hi":
                         roman_text = transliterate(text_final.strip(), sanscript.DEVANAGARI, sanscript.IAST)
                         output_line += f" ({roman_text})"
@@ -200,10 +200,6 @@ if __name__ == "__main__":
     parser.add_argument("-l", "--lang_codes", required=True, 
 
                         help="Comma-separated language codes (e.g., en,hi). First is primary, second is fallback.")
-
-    parser.add_argument("-t", "--transliterate", action="store_true", 
-
-                        help="If specified, add phonetic transliteration for the secondary language.")
 
     parser.add_argument("--min_speech_duration_ms", type=int, default=300,
 
@@ -253,7 +249,7 @@ if __name__ == "__main__":
 
 
 
-    transcribe_audio(args.input, output_path, primary_lang, secondary_lang, args.transliterate,
+    transcribe_audio(args.input, output_path, primary_lang, secondary_lang,
 
                     min_speech_duration_ms=args.min_speech_duration_ms,
 

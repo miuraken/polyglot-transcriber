@@ -9,7 +9,7 @@ This project provides a command-line tool to transcribe multi-language audio fil
 *   **Configurable Language Handling**:
     *   Specify a primary language and a fallback secondary language.
     *   Any segment not detected as the primary language will be transcribed using the secondary language.
-*   **Phonetic Transliteration**: Optionally adds IAST (International Alphabet of Sanskrit Transliteration) phonetic notation for the secondary language (currently supported for Hindi).
+*   **Phonetic Transliteration**: Automatically adds IAST (International Alphabet of Sanskrit Transliteration) phonetic notation for segments transcribed in the secondary language (currently supported for Hindi).
 *   **Command-Line Interface**: Easy to use via command-line arguments.
 
 ## Installation
@@ -51,7 +51,7 @@ This project provides a command-line tool to transcribe multi-language audio fil
 Run the `transcriber.py` script with the following command-line arguments:
 
 ```bash
-python3 transcriber.py -i <input_audio_file> -o <output_text_file> -l <primary_lang,secondary_lang> [-t] [--min_speech_duration_ms <ms>] [--min_silence_duration_ms <ms>]
+python3 transcriber.py -i <input_audio_file> -o <output_path> -l <primary_lang,secondary_lang> [--min_speech_duration_ms <ms>] [--min_silence_duration_ms <ms>]
 ```
 
 ### Arguments
@@ -59,16 +59,15 @@ python3 transcriber.py -i <input_audio_file> -o <output_text_file> -l <primary_l
 *   `-i, --input <input_audio_file>`: Path to the input audio file (e.g., `audio.mp3`, `audio.m4a`). **Required.**
 *   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. **Required.**
 *   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). Any segment not detected as the primary language will be transcribed using the secondary language. **Required.**
-*   `-t, --transliterate`: (Optional switch) If specified, phonetic transliteration (IAST) will be added in parentheses for segments transcribed in the secondary language.
 *   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `300ms`.
 *   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `600ms`.
 
 ### Example
 
-To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary, including IAST transliteration for Hindi:
+To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary (transliteration for Hindi is automatic):
 
 ```bash
-python3 transcriber.py -i hindi1_sample.m4a -o transcription.txt -l en,hi -t
+python3 transcriber.py -i hindi1_sample.m4a -o transcription.txt -l en,hi
 ```
 
 The console output will show progress like this:
