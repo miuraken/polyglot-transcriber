@@ -101,21 +101,20 @@ The console output will show progress like this:
 The output `transcription.txt` will look something like this:
 
 ```
-00:00.00 [en] This is Unit 1 of Pimsleur's Hindi.
-00:03.42 [en] Listen to this Hindi conversation.
-00:05.94 [hi] सुनिये, क्या आप अंग्रेजी समझती हैं? (suniye, kyā āpa aṃgrejī samajhatī haiṃ?)
-00:09.12 [hi] जी नहीं, मैं अंग्रेजी नहीं समझती हूँ. (jī nahīṃ, maiṃ aṃgrejī nahīṃ samajhatī hū~.)
-00:12.60 [hi] मैं थोड़ी थोड़ी हिंदी समझता हूँ. (maiṃ thor̤ī thor̤ī hiṃdī samajhatā hū~.)
-00:15.12 [hi] क्या आप अमरीकी हैं? (kyā āpa amarīkī haiṃ?)
-00:17.10 [en] Jee haan.
-00:18.24 [en] In the next few minutes, you'll learn not only to understand this conversation,
-00:23.43 [en] but to take part in it yourself.
-00:25.71 [en] Imagine that an American man meets a
+00:00.00 [en] This is Unit 1 of Hindi Lesson.
+00:05.59 [en] Listen to this Hindi conversation.
+00:08.82 [hi] सुन्ये, क्या आप अंग्रेजी समझती हैं? (sunye, kyā āpa aṃgrejī samajhatī haiṃ?)
+00:12.14 [hi] जी नहीं, मैं अंग्रेजी नहीं समझती हूँ. (jī nahīṃ, maiṃ aṃgrejī nahīṃ samajhatī hū~.)
+00:15.80 [hi] मैं थोड़ी थोड़ी हिंदी समझता हूँ. (maiṃ thor̤ī thor̤ī hiṃdī samajhatā hū~.)
+00:18.62 [hi] क्या आप अमरीकी हैं? (kyā āpa amarīkī haiṃ?)
+00:20.12 [hi] जी हाँ. (jī hā~.)
+00:22.65 [en] In the next few minutes, you'll learn not only to understand this conversation,
+00:27.71 [en] but to take part in it yourself.
 ```
 
 ## Supported Languages for Transliteration
 
-Currently, phonetic transliteration (`-t` option) is only supported for **Hindi (`hi`)**. Support for other languages will be added in future updates.
+Currently, phonetic transliteration is only supported for **Hindi (`hi`)**. Support for other languages will be added in future updates.
 
 ## License
 
