@@ -1,6 +1,6 @@
 # Polyglot Transcriber
 
-This project provides a command-line tool to transcribe multi-language audio files using OpenAI's Whisper model combined with Voice Activity Detection (VAD) for segmenting audio by silence. It's particularly useful for language learners who need to transcribe mixed-language audio, offering the flexibility to specify primary and secondary languages, and to include phonetic transliteration for the secondary language.
+This project provides a command-line tool to transcribe multi-language audio files using OpenAI's Whisper model combined with Voice Activity Detection (VAD) for segmenting audio by silence. It's particularly useful for language learners who need to transcribe mixed-language audio, offering the flexibility to specify primary and secondary languages, and to include IAST phonetic transliteration for Indic-script languages such as Hindi.
 
 ## Features
 
@@ -9,7 +9,7 @@ This project provides a command-line tool to transcribe multi-language audio fil
 *   **Configurable Language Handling**:
     *   Specify a primary language and a fallback secondary language.
     *   Any segment not detected as the primary language will be transcribed using the secondary language.
-*   **Phonetic Transliteration**: Automatically adds IAST (International Alphabet of Sanskrit Transliteration) phonetic notation for segments transcribed in the secondary language (currently supported for Hindi).
+*   **Phonetic Transliteration**: Automatically adds IAST (International Alphabet of Sanskrit Transliteration) phonetic notation for segments transcribed in an Indic-script language (Hindi, Marathi, Nepali, Sanskrit, Bengali, etc.).
 *   **Command-Line Interface**: Easy to use via command-line arguments.
 
 ## Installation
@@ -59,8 +59,9 @@ python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang
 *   `-i, --input <input_audio_file>`: Path to the input audio file (e.g., `audio.mp3`, `audio.m4a`). **Required.**
 *   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. If not specified, the output file will be saved in the same directory as the input audio file, named after the input file with a `.txt` extension.
 *   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). **Required.**
-*   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `300ms`.
-*   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `600ms`.
+*   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `200ms`.
+*   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `300ms`.
+*   `--min_segment_duration_ms <ms>`: VAD segments shorter than this are skipped (ms). Default: `500ms`. Lower it if very short utterances are missing; raise it if Whisper hallucinates on short noises.
 *   `--lang_prob_threshold <float>`: Probability threshold for language detection. If the detected probability of the primary language is below this value, the script will fall back to the secondary language. Default: `0.90`. This is useful for forcing the secondary language when Whisper is not confident about its detection of the primary language.
 *   `--vad_aggressiveness <0-3>`: Sets the VAD aggressiveness mode. An integer from 0 to 3, where 0 is the least aggressive (most sensitive to picking up speech) and 3 is the most aggressive (least sensitive). Default: `1`.
 
@@ -92,11 +93,13 @@ The console output will show progress like this:
 
 ```
 ...
-  VAD Segment 00:00.00 - 00:03.42: Detected language = en - "This is Unit 1 of Pimsleur's Hindi."
-  VAD Segment 00:03.42 - 00:05.94: Detected language = en - "Listen to this Hindi conversation."
-  VAD Segment 00:05.94 - 00:09.12: Detected language = hi - "सुनिये, क्या आप अंग्रेजी समझती हैं?"
+  00:02.04: en (99%) - This is Unit 1 of Pimsleur's H...
+  00:05.55: en (98%) - Listen to this Hindi conversat...
+  00:08.79: hi (95%) - सुनिये, क्या आप अंग्रेजी समझती...
 ...
 ```
+
+An asterisk after the language code (e.g. `hi*`) means the primary language was detected but with a probability below `--lang_prob_threshold`, so the secondary language was forced.
 
 The output `transcription.txt` will look something like this:
 
@@ -114,7 +117,21 @@ The output `transcription.txt` will look something like this:
 
 ## Supported Languages for Transliteration
 
-Currently, phonetic transliteration is only supported for **Hindi (`hi`)**. Support for other languages will be added in future updates.
+IAST transliteration is applied automatically to any segment transcribed in one of the following languages (IAST is designed for Indic/Brahmic scripts, so other languages are not transliterated):
+
+| Code | Language | Script |
+|---|---|---|
+| `hi` | Hindi | Devanagari |
+| `mr` | Marathi | Devanagari |
+| `ne` | Nepali | Devanagari |
+| `sa` | Sanskrit | Devanagari |
+| `bn` | Bengali | Bengali |
+| `gu` | Gujarati | Gujarati |
+| `pa` | Punjabi | Gurmukhi |
+| `ta` | Tamil | Tamil |
+| `te` | Telugu | Telugu |
+| `kn` | Kannada | Kannada |
+| `ml` | Malayalam | Malayalam |
 
 ## License
 

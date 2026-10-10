@@ -6,7 +6,8 @@ __pycache__/
 .Python
 env/
 venv/
-myenv/ # 仮想環境のディレクトリ名
+# 仮想環境のディレクトリ名
+myenv/
 
 # Editor
 .vscode/
@@ -21,7 +22,7 @@ Thumbs.db
 ~/.cache/whisper/
 
 # Temporary VAD segments
-temp_vad_segment_*.wav
+temp_*.wav
 
 # Output files
 output.txt
