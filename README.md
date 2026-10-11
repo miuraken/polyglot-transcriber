@@ -1,15 +1,19 @@
 # Polyglot Transcriber
 
-This project provides a command-line tool to transcribe multi-language audio files using OpenAI's Whisper model combined with Voice Activity Detection (VAD) for segmenting audio by silence. It's particularly useful for language learners who need to transcribe mixed-language audio, offering the flexibility to specify primary and secondary languages, and to include IAST phonetic transliteration for Indic-script languages such as Hindi.
+This project provides a command-line tool to transcribe multi-language audio files (e.g. language-course audio that mixes an explanation language with the target language). It segments audio with Silero VAD, decides the language of each segment with Whisper, transcribes it, and optionally appends a pronunciation reading (IAST for Indic scripts, romaji / katakana for Korean).
 
 ## Features
 
 *   **Multi-language Transcription**: Transcribes audio files containing multiple languages.
-*   **Voice Activity Detection (VAD)**: Segments audio based on silence, allowing for more accurate language detection and transcription per segment.
+*   **Voice Activity Detection (VAD)**: Segments audio with [Silero VAD](https://github.com/snakers4/silero-vad), allowing language detection and transcription per utterance.
+*   **Fast on Apple Silicon**: Uses [mlx-whisper](https://pypi.org/project/mlx-whisper/) with `large-v3-turbo` on M-series Macs; falls back to `openai-whisper` elsewhere.
 *   **Configurable Language Handling**:
     *   Specify a primary language and a fallback secondary language.
-    *   Any segment not detected as the primary language will be transcribed using the secondary language.
-*   **Phonetic Transliteration**: Automatically adds IAST (International Alphabet of Sanskrit Transliteration) phonetic notation for segments transcribed in an Indic-script language (Hindi, Marathi, Nepali, Sanskrit, Bengali, etc.).
+    *   A segment is assigned to the primary language only if Whisper is confident about it; everything else is transcribed as the secondary language.
+*   **Pronunciation Readings** (`--reading`):
+    *   Indic scripts (Hindi, Marathi, Nepali, Sanskrit, Bengali, etc.): IAST.
+    *   Korean: Revised Romanization with pronunciation rules (via [koroman](https://pypi.org/project/koroman/)) and/or katakana.
+    *   Can be turned off with `--reading none` once you no longer need it.
 *   **Command-Line Interface**: Easy to use via command-line arguments.
 
 ## Installation
@@ -30,10 +34,9 @@ This project provides a command-line tool to transcribe multi-language audio fil
     ```bash
     pip install -r requirements.txt
     ```
+    `mlx-whisper` is installed only on Apple Silicon Macs.
 
-4.  **Install FFmpeg:**
-    `pydub` (used internally by some libraries) and `librosa` rely on FFmpeg for audio processing. If you don't have FFmpeg installed, please install it.
-    
+4.  **Install FFmpeg** (used to decode audio files):
     *   **macOS (using Homebrew):**
         ```bash
         brew install ffmpeg
@@ -46,9 +49,9 @@ This project provides a command-line tool to transcribe multi-language audio fil
     *   **Windows:**
         Download from the [FFmpeg website](https://ffmpeg.org/download.html) and add it to your system's PATH.
 
-## Usage
+The Whisper model is downloaded automatically on first run (about 1.6GB for `large-v3-turbo`).
 
-Run the `transcriber.py` script with the following command-line arguments:
+## Usage
 
 ```bash
 python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang,secondary_lang> [options]
@@ -57,81 +60,87 @@ python3 transcriber.py -i <input_audio_file> [-o <output_path>] -l <primary_lang
 ### Arguments
 
 *   `-i, --input <input_audio_file>`: Path to the input audio file (e.g., `audio.mp3`, `audio.m4a`). **Required.**
-*   `-o, --output <output_path>`: Path to the output text file (e.g., `transcription.txt`) or a directory. If a directory path is provided, the output file will be automatically named based on the input file (e.g., `<input_audio_file>.txt`) and saved in that directory. If not specified, the output file will be saved in the same directory as the input audio file, named after the input file with a `.txt` extension.
-*   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first code is the primary language (e.g., `en`), and the second is the fallback secondary language (e.g., `hi`). **Required.**
-*   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment (ms). Default: `200ms`.
-*   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary (ms). Default: `300ms`.
-*   `--min_segment_duration_ms <ms>`: VAD segments shorter than this are skipped (ms). Default: `500ms`. Lower it if very short utterances are missing; raise it if Whisper hallucinates on short noises.
-*   `--lang_prob_threshold <float>`: Probability threshold for language detection. If the detected probability of the primary language is below this value, the script will fall back to the secondary language. Default: `0.90`. This is useful for forcing the secondary language when Whisper is not confident about its detection of the primary language.
-*   `--vad_aggressiveness <0-3>`: Sets the VAD aggressiveness mode. An integer from 0 to 3, where 0 is the least aggressive (most sensitive to picking up speech) and 3 is the most aggressive (least sensitive). Default: `1`.
+*   `-o, --output <output_path>`: Path to the output text file or a directory. If a directory is given, the output is named after the input file (`<input>.txt`). If omitted, the output is saved next to the input file with a `.txt` extension.
+*   `-l, --lang_codes <primary_lang,secondary_lang>`: Comma-separated language codes. The first is the primary language (e.g. the explanation language `ja`), the second is the fallback secondary language (e.g. the target language `ko`). **Required.**
+*   `--reading <romaji|kana|both|none>`: Reading appended to supported languages. Default: `romaji`. `kana` is available for Korean only; for other languages it falls back to romaji (IAST).
+*   `--model <name>`: Whisper model name or Hugging Face repo. Default: `large-v3-turbo`.
+*   `--backend <auto|mlx|torch>`: `auto` uses MLX on Apple Silicon and openai-whisper elsewhere. Default: `auto`.
+*   `--lang_prob_threshold <float>`: The primary language is chosen only if its detected probability is at least this value; otherwise the secondary language is used. Default: `0.90`.
+*   `--vad_threshold <float>`: Silero VAD speech probability threshold. Lower = more sensitive. Default: `0.5`.
+*   `--min_speech_duration_ms <ms>`: Minimum duration of speech to consider as a segment. Default: `200`.
+*   `--min_silence_duration_ms <ms>`: Minimum duration of silence to consider as a segment boundary. Default: `300`.
+*   `--speech_pad_ms <ms>`: Padding added around each speech region. Default: `100`.
+*   `--min_segment_duration_ms <ms>`: VAD segments shorter than this are skipped. Default: `500`. Lower it if very short utterances are missing; raise it if Whisper hallucinates on short noises.
 
-### Example
+### Examples
 
-To transcribe `hindi1_sample.m4a` with English as primary and Hindi as secondary, saving the output to `hindi1_sample.txt` in the same directory:
+Korean course explained in Japanese, with romaji and katakana readings:
+
+```bash
+python3 transcriber.py -i korean_lesson01.mp3 -l ja,ko --reading both
+```
+
+```
+00:03.12 [ja] 今日は挨拶の表現を学びましょう。
+00:06.48 [ko] 안녕하세요? (annyeonghaseyo? / アンニョンハセヨ?)
+00:08.90 [ko] 감사합니다. (gamsahamnida. / カㇺサハㇺニダ.)
+```
+
+Once you no longer need the readings:
+
+```bash
+python3 transcriber.py -i korean_lesson20.mp3 -l ja,ko --reading none
+```
+
+Hindi course explained in English:
 
 ```bash
 python3 transcriber.py -i hindi1_sample.m4a -l en,hi
 ```
 
-You can still specify an output path if needed:
-
-```bash
-python3 transcriber.py -i hindi1_sample.m4a -o transcription.txt -l en,hi
+```
+00:01.98 [en] This is Unit 1 of Pimsleur's Hindi.
+00:05.47 [en] Listen to this Hindi conversation.
+00:09.69 [hi] क्या आप अंग्रेजी समझती हैं? (kyā āpa aṃgrejī samajhatī haiṃ?)
+00:12.09 [hi] जी नहीं (jī nahīṃ)
+00:13.31 [hi] मैं अंग्रेजी नहीं समझती हूँ (maiṃ aṃgrejī nahīṃ samajhatī hū~)
+00:22.56 [en] in the next few minutes.
 ```
 
-If you find that short words are being missed entirely, try making the VAD more sensitive by setting `--vad_aggressiveness` to `0`:
-```bash
-python3 transcriber.py -i your_long_file.mp3 -l en,hi --vad_aggressiveness 0
-```
+### Tuning
 
-If you find that Hindi segments are being misidentified as English, you can try lowering the language probability threshold:
-```bash
-python3 transcriber.py -i your_long_file.mp3 -l en,hi --lang_prob_threshold 0.80
-```
+*   Short words are missing → lower `--vad_threshold` (e.g. `0.35`) and/or `--min_segment_duration_ms` (e.g. `300`).
+*   Target-language segments are labeled as the primary language → **raise** `--lang_prob_threshold` (e.g. `0.95`).
+*   Primary-language segments are labeled as the target language → **lower** `--lang_prob_threshold` (e.g. `0.80`).
 
-The console output will show progress like this:
+The console output shows progress like this:
 
 ```
-...
-  00:02.04: en (99%) - This is Unit 1 of Pimsleur's H...
-  00:05.55: en (98%) - Listen to this Hindi conversat...
-  00:08.79: hi (95%) - सुनिये, क्या आप अंग्रेजी समझती...
-...
+  00:01.98: en (99%) - This is Unit 1 of Pimsleur's H...
+  00:09.69: hi (98%) - क्या आप अंग्रेजी समझती हैं?...
+  00:20.60: hi* (57%) - जीहा...
 ```
 
-An asterisk after the language code (e.g. `hi*`) means the primary language was detected but with a probability below `--lang_prob_threshold`, so the secondary language was forced.
+The percentage is the confidence of the language decision. An asterisk (e.g. `hi*`) marks a low-confidence decision (below 75%) that is worth reviewing.
 
-The output `transcription.txt` will look something like this:
+## Supported Readings
 
-```
-00:00.00 [en] This is Unit 1 of Hindi Lesson.
-00:05.59 [en] Listen to this Hindi conversation.
-00:08.82 [hi] सुन्ये, क्या आप अंग्रेजी समझती हैं? (sunye, kyā āpa aṃgrejī samajhatī haiṃ?)
-00:12.14 [hi] जी नहीं, मैं अंग्रेजी नहीं समझती हूँ. (jī nahīṃ, maiṃ aṃgrejī nahīṃ samajhatī hū~.)
-00:15.80 [hi] मैं थोड़ी थोड़ी हिंदी समझता हूँ. (maiṃ thor̤ī thor̤ī hiṃdī samajhatā hū~.)
-00:18.62 [hi] क्या आप अमरीकी हैं? (kyā āpa amarīkī haiṃ?)
-00:20.12 [hi] जी हाँ. (jī hā~.)
-00:22.65 [en] In the next few minutes, you'll learn not only to understand this conversation,
-00:27.71 [en] but to take part in it yourself.
-```
+| Code | Language | `romaji` | `kana` |
+|---|---|---|---|
+| `ko` | Korean | Revised Romanization with pronunciation rules | Katakana (e.g. 감사합니다 → カㇺサハㇺニダ) |
+| `hi` | Hindi | IAST | – |
+| `mr` | Marathi | IAST | – |
+| `ne` | Nepali | IAST | – |
+| `sa` | Sanskrit | IAST | – |
+| `bn` | Bengali | IAST | – |
+| `gu` | Gujarati | IAST | – |
+| `pa` | Punjabi | IAST | – |
+| `ta` | Tamil | IAST | – |
+| `te` | Telugu | IAST | – |
+| `kn` | Kannada | IAST | – |
+| `ml` | Malayalam | IAST | – |
 
-## Supported Languages for Transliteration
-
-IAST transliteration is applied automatically to any segment transcribed in one of the following languages (IAST is designed for Indic/Brahmic scripts, so other languages are not transliterated):
-
-| Code | Language | Script |
-|---|---|---|
-| `hi` | Hindi | Devanagari |
-| `mr` | Marathi | Devanagari |
-| `ne` | Nepali | Devanagari |
-| `sa` | Sanskrit | Devanagari |
-| `bn` | Bengali | Bengali |
-| `gu` | Gujarati | Gujarati |
-| `pa` | Punjabi | Gurmukhi |
-| `ta` | Tamil | Tamil |
-| `te` | Telugu | Telugu |
-| `kn` | Kannada | Kannada |
-| `ml` | Malayalam | Malayalam |
+Readings are implemented in [readings.py](readings.py). Katakana for Korean is an approximation for learners (liaison, nasalization and voicing are applied; final consonants use small kana such as ㇰ ㇽ ㇺ ㇷ゚).
 
 ## License
 

@@ -1,110 +1,117 @@
 import argparse
 import os
+import platform
 import sys
 
-import librosa
 import numpy as np
 import torch
-import webrtcvad
-import whisper
-from indic_transliteration import sanscript
-from indic_transliteration.sanscript import transliterate
+from silero_vad import get_speech_timestamps, load_silero_vad
+
+from readings import READING_STYLES, make_reading, relabel_by_script
 
 # --- Global Constants ---
-VAD_AGGRESSIVENESS = 1  # Aggressiveness mode for VAD: 0 (gentle) to 3 (aggressive)
-SAMPLE_RATE = 16000     # WebRTCVAD requires exactly 16kHz
-FRAME_LENGTH_MS = 30    # Frame duration: Must be 10, 20, or 30ms
-
-# Languages (Whisper codes) whose native script can be transliterated to IAST.
-# IAST is designed for Indic (Brahmic) scripts, so only these are supported.
-IAST_SOURCE_SCRIPTS = {
-    "hi": sanscript.DEVANAGARI,  # Hindi
-    "mr": sanscript.DEVANAGARI,  # Marathi
-    "ne": sanscript.DEVANAGARI,  # Nepali
-    "sa": sanscript.DEVANAGARI,  # Sanskrit
-    "bn": sanscript.BENGALI,     # Bengali
-    "gu": sanscript.GUJARATI,    # Gujarati
-    "pa": sanscript.GURMUKHI,    # Punjabi
-    "ta": sanscript.TAMIL,       # Tamil
-    "te": sanscript.TELUGU,      # Telugu
-    "kn": sanscript.KANNADA,     # Kannada
-    "ml": sanscript.MALAYALAM,   # Malayalam
-}
+SAMPLE_RATE = 16000                 # Whisper and Silero VAD both expect 16kHz mono
+DEFAULT_MODEL = "large-v3-turbo"
+LOW_CONFIDENCE = 0.75               # Language decisions below this share are marked with '*'
 
 
-def read_wave(path):
+# --- ASR backends ----------------------------------------------------------------
+class MLXWhisperBackend:
+    """Whisper on Apple Silicon GPU via MLX (fast on M-series Macs)."""
+    name = "mlx"
+
+    def __init__(self, model):
+        import mlx.core as mx
+        import mlx_whisper
+        from mlx_whisper import audio as mlx_audio
+        from mlx_whisper.transcribe import ModelHolder
+
+        self._mx, self._mlx_whisper, self._audio = mx, mlx_whisper, mlx_audio
+        self.repo = model if "/" in model else f"mlx-community/whisper-{model}"
+        # Same dtype as mlx_whisper.transcribe's default (fp16) so the cached model is reused
+        self.model = ModelHolder.get_model(self.repo, mx.float16)
+
+    def load_audio(self, path):
+        return np.asarray(self._audio.load_audio(path), dtype=np.float32)
+
+    def language_probs(self, audio):
+        a = self._audio
+        mel = a.log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels, padding=a.N_SAMPLES)
+        mel = a.pad_or_trim(mel, a.N_FRAMES, axis=-2).astype(self._mx.float16)
+        _, probs = self.model.detect_language(mel)
+        return probs
+
+    def transcribe(self, audio, language):
+        result = self._mlx_whisper.transcribe(
+            audio, path_or_hf_repo=self.repo, language=language,
+            condition_on_previous_text=False, verbose=None,
+        )
+        return result["segments"]
+
+
+class TorchWhisperBackend:
+    """Reference openai-whisper implementation (CUDA / CPU; works on any platform)."""
+    name = "torch"
+
+    def __init__(self, model):
+        import whisper
+        self._whisper = whisper
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = whisper.load_model(model, device=self.device)
+
+    def load_audio(self, path):
+        return self._whisper.load_audio(path)
+
+    def language_probs(self, audio):
+        w = self._whisper
+        mel = w.log_mel_spectrogram(w.pad_or_trim(audio), n_mels=self.model.dims.n_mels).to(self.device)
+        _, probs = self.model.detect_language(mel)
+        return probs
+
+    def transcribe(self, audio, language):
+        result = self._whisper.transcribe(
+            self.model, audio, language=language, fp16=(self.device == "cuda"),
+            condition_on_previous_text=False,
+        )
+        return result["segments"]
+
+
+def create_backend(backend, model):
+    if backend == "auto":
+        is_apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
+        backend = "mlx" if is_apple_silicon else "torch"
+    return MLXWhisperBackend(model) if backend == "mlx" else TorchWhisperBackend(model)
+
+
+# --- Pipeline ----------------------------------------------------------------------
+def vad_segments(audio, threshold, min_speech_duration_ms, min_silence_duration_ms, speech_pad_ms):
+    """Yields (start_sec, end_sec, samples) for each speech region found by Silero VAD."""
+    vad_model = load_silero_vad()
+    timestamps = get_speech_timestamps(
+        torch.from_numpy(audio), vad_model,
+        threshold=threshold, sampling_rate=SAMPLE_RATE,
+        min_speech_duration_ms=min_speech_duration_ms,
+        min_silence_duration_ms=min_silence_duration_ms,
+        speech_pad_ms=speech_pad_ms,
+    )
+    for ts in timestamps:
+        yield ts["start"] / SAMPLE_RATE, ts["end"] / SAMPLE_RATE, audio[ts["start"]:ts["end"]]
+
+
+def choose_language(probs, primary_lang, secondary_lang, threshold):
     """
-    Reads an audio file and converts it to 16-bit PCM format.
-    Required for WebRTCVAD compatibility.
+    Chooses the primary language only when Whisper is confident about it;
+    everything else falls back to the secondary language.
+
+    Comparing only the two expected languages does NOT work well: e.g. short Hindi
+    utterances are often detected as Urdu (or unrelated languages), so the residual
+    probability must count against the primary language rather than be ignored.
+    Returns (language, confidence).
     """
-    audio, sr = librosa.load(path, sr=SAMPLE_RATE, mono=True)
-    # Clip to avoid int16 overflow, then convert float audio to 16-bit integer PCM
-    audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-    return sr, audio_int16.tobytes()
-
-
-class Frame:
-    """Represents a short segment (frame) of audio data for VAD processing."""
-    def __init__(self, bytes, timestamp, duration):
-        self.bytes = bytes
-        self.timestamp = timestamp
-        self.duration = duration
-
-
-def frame_generator(frame_duration_ms, audio, sample_rate):
-    """
-    Yields audio frames of specified duration from raw PCM audio data.
-    """
-    n = int(sample_rate * (frame_duration_ms / 1000.0) * 2)
-    offset, timestamp = 0, 0.0
-    duration = (n / 2) / sample_rate
-    while offset + n <= len(audio):
-        yield Frame(audio[offset : offset + n], timestamp, duration)
-        offset += n
-        timestamp += duration
-
-
-def vad_segment_generator(wave_file, aggressiveness, min_speech_duration_ms=200, min_silence_duration_ms=300):
-    """
-    Analyzes audio frames and yields contiguous segments of speech.
-    Uses a state-machine logic to filter out short noises or brief pauses.
-    """
-    sample_rate, audio = wave_file
-    vad = webrtcvad.Vad(aggressiveness)
-    frames = list(frame_generator(FRAME_LENGTH_MS, audio, sample_rate))
-
-    is_speech_flags = [vad.is_speech(f.bytes, sample_rate) for f in frames]
-    current_speech_frames = 0
-    current_silence_frames = 0
-    start_index = None  # None = not currently inside a speech segment
-
-    for i, is_speech in enumerate(is_speech_flags):
-        if is_speech:
-            current_speech_frames += 1
-            current_silence_frames = 0
-        else:
-            current_silence_frames += 1
-            current_speech_frames = 0
-
-        # Trigger start of a segment if speech persists longer than threshold
-        if start_index is None and current_speech_frames * FRAME_LENGTH_MS >= min_speech_duration_ms:
-            start_index = i - current_speech_frames + 1
-
-        # Trigger end of a segment if silence persists longer than threshold
-        if start_index is not None and current_silence_frames * FRAME_LENGTH_MS >= min_silence_duration_ms:
-            end_index = i - current_silence_frames + 1
-            yield _create_segment(frames, start_index, end_index)
-            start_index, current_speech_frames, current_silence_frames = None, 0, 0
-
-    # Handle the final remaining segment if the file ends during speech
-    if start_index is not None:
-        yield _create_segment(frames, start_index, len(frames))
-
-
-def _create_segment(frames, start, end):
-    """Combines a range of frames into a single binary audio segment."""
-    data = b"".join(f.bytes for f in frames[start:end])
-    return (frames[start].timestamp, frames[end-1].timestamp + frames[end-1].duration, data)
+    p = probs.get(primary_lang, 0.0)
+    if p >= threshold:
+        return primary_lang, p
+    return secondary_lang, 1.0 - p
 
 
 def format_time(seconds):
@@ -112,73 +119,77 @@ def format_time(seconds):
     return f"{int(seconds // 60):02d}:{seconds % 60:05.2f}"
 
 
-def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang,
-                     min_speech_duration_ms, min_silence_duration_ms, lang_prob_threshold, vad_aggressiveness,
-                     min_segment_duration_ms):
+def transcribe_audio(input_audio_path, output_text_path, primary_lang, secondary_lang, args):
     """
     Main transcription pipeline:
-    1. Loads Whisper Large model.
-    2. Segments audio using VAD.
-    3. Detects language for each segment.
-    4. Transcribes and applies IAST transliteration for Indic-script languages.
+    1. Loads the Whisper backend (MLX on Apple Silicon, openai-whisper elsewhere).
+    2. Segments audio using Silero VAD.
+    3. Chooses between the primary/secondary language for each segment.
+    4. Transcribes and appends readings (IAST / romaji / kana) where supported.
     """
     print("Loading Whisper model...")
-    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-    model = whisper.load_model("large", device=device)
+    backend = create_backend(args.backend, args.model)
+    print(f"Backend: {backend.name}")
 
-    sr, audio_data = read_wave(input_audio_path)
+    audio = backend.load_audio(input_audio_path)
+    min_samples = SAMPLE_RATE * args.min_segment_duration_ms / 1000
 
     with open(output_text_path, "w", encoding="utf-8") as f:
-        for start_abs, end_abs, segment_bytes in vad_segment_generator(
-            (sr, audio_data), vad_aggressiveness, min_speech_duration_ms, min_silence_duration_ms
+        for start_abs, end_abs, segment in vad_segments(
+            audio, args.vad_threshold, args.min_speech_duration_ms,
+            args.min_silence_duration_ms, args.speech_pad_ms,
         ):
-            # Convert PCM bytes to float32 for Whisper (passed directly; no temp files)
-            audio_f32 = np.frombuffer(segment_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            if len(audio_f32) / sr * 1000 < min_segment_duration_ms:
+            if len(segment) < min_samples:
                 continue
 
-            mel = whisper.log_mel_spectrogram(
-                whisper.pad_or_trim(audio_f32), n_mels=model.dims.n_mels
-            ).to(model.device)
+            probs = backend.language_probs(segment)
+            target_lang, confidence = choose_language(
+                probs, primary_lang, secondary_lang, args.lang_prob_threshold
+            )
+            low = confidence < LOW_CONFIDENCE
 
-            # Language Detection Logic
-            _, probs = model.detect_language(mel)
-            most_likely = max(probs, key=probs.get)
-
-            # Determine target language: Force secondary if primary confidence is too low
-            lang_forced = (most_likely == primary_lang and probs.get(primary_lang, 0) < lang_prob_threshold)
-            target_lang = secondary_lang if (lang_forced or most_likely != primary_lang) else primary_lang
-
-            # Perform Transcription
-            result = whisper.transcribe(model, audio_f32, fp16=False, language=target_lang)
-
-            for seg in result["segments"]:
+            for seg in backend.transcribe(segment, target_lang):
                 text = seg["text"].strip()
                 if not text:
                     continue
-                output = f"{format_time(start_abs + seg['start'])} [{target_lang}] {text}"
+                # Fix the label when the transcript is clearly in the other language's script
+                lang = relabel_by_script(text, target_lang, (primary_lang, secondary_lang))
+                relabeled = lang != target_lang
+                output = f"{format_time(start_abs + seg['start'])} [{lang}] {text}"
 
-                # Apply IAST transliteration for supported Indic-script languages
-                if target_lang in IAST_SOURCE_SCRIPTS:
-                    output += f" ({transliterate(text, IAST_SOURCE_SCRIPTS[target_lang], sanscript.IAST)})"
+                reading = make_reading(text, lang, args.reading)
+                if reading:
+                    output += f" ({reading})"
 
                 f.write(output + "\n")
                 f.flush()
-                # Console logging for progress tracking
-                print(f"  {format_time(start_abs)}: {target_lang}{'*' if lang_forced else ''} ({int(probs[most_likely]*100)}%) - {text[:30]}...")
+                # Console logging ('*' = low-confidence language decision, '!' = relabeled by script)
+                mark = "!" if relabeled else ("*" if low else "")
+                print(f"  {format_time(start_abs + seg['start'])}: {lang}{mark} "
+                      f"({int(confidence * 100)}%) - {text[:30]}...")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe multi-language audio using VAD & Whisper.")
     parser.add_argument("-i", "--input", required=True, help="Input audio path.")
     parser.add_argument("-o", "--output", help="Output path (file or directory).")
-    parser.add_argument("-l", "--lang_codes", required=True, help="Codes e.g., 'en,hi'.")
+    parser.add_argument("-l", "--lang_codes", required=True, help="Codes e.g., 'en,hi' or 'ja,ko'.")
+    parser.add_argument("--reading", default="romaji", choices=READING_STYLES,
+                        help="Reading appended to supported languages (default: romaji).")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Whisper model name or HF repo (default: {DEFAULT_MODEL}).")
+    parser.add_argument("--backend", default="auto", choices=["auto", "mlx", "torch"])
     parser.add_argument("--min_speech_duration_ms", type=int, default=200)
     parser.add_argument("--min_silence_duration_ms", type=int, default=300)
+    parser.add_argument("--speech_pad_ms", type=int, default=100,
+                        help="Padding added around each VAD speech region (ms).")
     parser.add_argument("--min_segment_duration_ms", type=int, default=500,
                         help="Skip VAD segments shorter than this (ms).")
-    parser.add_argument("--lang_prob_threshold", type=float, default=0.90)
-    parser.add_argument("--vad_aggressiveness", type=int, default=VAD_AGGRESSIVENESS, choices=[0, 1, 2, 3])
+    parser.add_argument("--vad_threshold", type=float, default=0.5,
+                        help="Silero VAD speech probability threshold (lower = more sensitive).")
+    parser.add_argument("--lang_prob_threshold", type=float, default=0.90,
+                        help="Primary language is chosen only if its detected probability is at least "
+                             "this value; otherwise the secondary language is used.")
 
     args = parser.parse_args()
 
@@ -196,6 +207,4 @@ if __name__ == "__main__":
         print("Error: Please provide both primary and secondary language codes.")
         sys.exit(1)
 
-    transcribe_audio(args.input, out, langs[0], langs[1], args.min_speech_duration_ms,
-                     args.min_silence_duration_ms, args.lang_prob_threshold, args.vad_aggressiveness,
-                     args.min_segment_duration_ms)
+    transcribe_audio(args.input, out, langs[0], langs[1], args)
